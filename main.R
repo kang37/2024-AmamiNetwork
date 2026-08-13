@@ -313,6 +313,40 @@ ggplot() +
   )
 dev.off()
 
+# 各类POI单独出图。
+walk(unique(all_poi$poi_type), function(type_x) {
+  # 简化标签：去除后缀词，转为标题格式。
+  label_x <- type_x %>%
+    str_replace_all("_", " ") %>%
+    str_remove_all(regex(" services| facilities| and utilities", ignore_case = TRUE)) %>%
+    str_squish() %>%
+    str_to_title()
+  png(
+    paste0("data_proc/poi_", type_x, "_", Sys.Date(), ".png"),
+    width = 1000, height = 1200, res = 300
+  )
+  p <- ggplot() +
+    geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+    geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
+    geom_sf(
+      data = all_poi %>% filter(poi_type == type_x),
+      color = "steelblue", size = 1, alpha = 0.8
+    ) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    labs(title = label_x) +
+    coord_sf() +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    )
+  print(p)
+  dev.off()
+})
+
 ## 图3 ----
 # 函数：各地点轨迹点数或人数，并显示游客和本地人比例作图。
 plt_loc_smry <- function(tar_var) {
