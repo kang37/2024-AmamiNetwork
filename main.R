@@ -205,7 +205,8 @@ road <- st_read("data_raw/osm_amami_road/研究范围内的道路.shp") %>%
     ))
   ) %>%
   # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛道路。
-  st_intersection(amami_main)
+  # 道路数据为CRS 4326，需先将amami_main转换后再做空间裁剪。
+  st_intersection(st_transform(amami_main, 4326))
 png(
   paste0("data_proc/road_", Sys.Date(), ".png"),
   width = 1000, height = 1200, res = 300
@@ -263,8 +264,11 @@ all_poi <- file_list %>%
 
     return(temp_sf)
   }) %>%
+  # 排除Public Amenities（仅13个：厕所/长椅/自动贩卖机，不纳入分析）。
+  filter(poi_type != "Public_Amenities_and_Utilities") %>%
   # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛POI。
-  st_intersection(amami_main)
+  # POI数据为CRS 4326，需先将amami_main转换后再做空间裁剪。
+  st_intersection(st_transform(amami_main, 4326))
 
 # 绘图。
 png(
