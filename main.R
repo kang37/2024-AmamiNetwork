@@ -16,7 +16,8 @@ amami_main <- amami %>%
   st_cast("POLYGON") %>%
   mutate(area = st_area(.)) %>%
   slice_max(area, n = 1) %>%
-  select(-area)
+  select(-area) %>%
+  st_transform(6668)
 
 # 自定义目标地点。
 loc <- st_read("data_raw/loc/loc62.shp") %>%
@@ -136,7 +137,8 @@ png(
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(
     data = st_as_sf(st_centroid(loc)) %>%
       mutate(spa_group = factor(spa_group, levels = c(
@@ -169,9 +171,16 @@ png(
 )
 set.seed(1234)
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  # 离岛（加計呂麻島等）用极浅灰色显示，表示不在研究范围内。
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  # 主岛用正常浅灰色覆盖在上层。
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(
-    data = st_jitter(sample_n(agoop_amami, size = 10000), 0.001),
+    # 先空间裁剪至主岛，再取样，排除加計呂麻島轨迹点（loc_id=NA者也可能落在离岛）。
+    data = st_jitter(
+      agoop_amami %>% st_intersection(amami_main) %>% sample_n(size = 10000),
+      0.001
+    ),
     size = 0.1, col = "black", alpha = 0.8
   ) +
   scale_x_continuous(
@@ -202,7 +211,8 @@ png(
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(data = road, aes(col = road_class)) +
   labs(col = "Class") +
   scale_x_continuous(
@@ -262,7 +272,8 @@ png(
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   # 绘制 POI 点，根据类别着色。
   geom_sf(data = all_poi, aes(color = poi_type), size = 0.5, alpha = 0.7) +
   scale_color_tableau(
