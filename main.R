@@ -9,6 +9,15 @@ showtext_auto()
 # tar_make()
 tar_load(agoop_amami)
 tar_load(amami)
+
+# 提取奄美大岛主岛多边形（amami 为 MULTIPOLYGON，包含加計呂麻島等离岛；
+# 按面积取最大的单一多边形，即奄美大岛本岛，用于裁剪道路和POI数据）。
+amami_main <- amami %>%
+  st_cast("POLYGON") %>%
+  mutate(area = st_area(.)) %>%
+  slice_max(area, n = 1) %>%
+  select(-area)
+
 # 自定义目标地点。
 loc <- st_read("data_raw/loc/loc62.shp") %>%
   # 计算每个定义地点的面积，单位为平方米。
@@ -185,7 +194,9 @@ road <- st_read("data_raw/osm_amami_road/研究范围内的道路.shp") %>%
     road_class = factor(road_class, levels = c(
       "primary", "secondary", "tertiary", "others"
     ))
-  )
+  ) %>%
+  # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛道路。
+  st_intersection(amami_main)
 png(
   paste0("data_proc/road_", Sys.Date(), ".png"),
   width = 1000, height = 1200, res = 300
@@ -241,7 +252,9 @@ all_poi <- file_list %>%
     temp_sf <- temp_sf %>% mutate(poi_type = type_name)
 
     return(temp_sf)
-  })
+  }) %>%
+  # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛POI。
+  st_intersection(amami_main)
 
 # 绘图。
 png(
