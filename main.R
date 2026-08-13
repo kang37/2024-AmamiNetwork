@@ -336,13 +336,17 @@ walk(unique(all_poi$poi_type), function(type_x) {
       breaks = c(129.1, 129.3, 129.5, 129.7),
       labels = c("129.1E", "129.3E", "129.5E", "129.7E")
     ) +
-    labs(title = label_x) +
+    annotate(
+      "label",
+      x = Inf, y = Inf,
+      label = label_x,
+      hjust = 1.05, vjust = 1.05,
+      size = 3, fill = "white",
+      label.size = 0.4, label.r = unit(0, "lines")
+    ) +
     coord_sf() +
     theme_bw() +
-    theme(
-      panel.grid.minor = element_blank(),
-      plot.title = element_text(hjust = 0.5)
-    )
+    theme(panel.grid.minor = element_blank())
   print(p)
   dev.off()
 })
