@@ -285,8 +285,8 @@ loc_dem_sup <-
   list(
     # 本地人。
     combined_data_norm %>%
-      left_join(loc_poi_access, by = c(“id” = “loc_id”)) %>%
-      filter(vis_src == “local”) %>%
+      left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+      filter(vis_src == "local") %>%
       mutate(
         # Step 2: 加权合成需求指数（各服务类型对应不同中心度）。
         demand_edu    = degree_norm,
@@ -300,12 +300,12 @@ loc_dem_sup <-
         sdi_raw_retail = retail     / demand_retail
       ) %>%
       # 需求为0时 SDI_raw 为 Inf/NaN，替换为 NA。
-      mutate(across(starts_with(“sdi_raw_”),
+      mutate(across(starts_with("sdi_raw_"),
                     ~ ifelse(is.infinite(.x) | is.nan(.x), NA, .x))) %>%
       # Step 4: min-max 归一化获得最终 SDI（在 vis_src 组内）。
       group_by(vis_src) %>%
       mutate(across(
-        starts_with(“sdi_raw_”),
+        starts_with("sdi_raw_"),
         ~ (.x - min(.x, na.rm = TRUE)) / (max(.x, na.rm = TRUE) - min(.x, na.rm = TRUE))
       )) %>%
       ungroup() %>%
@@ -317,12 +317,12 @@ loc_dem_sup <-
       ) %>%
       select(vis_src, id, season, ds_edu, ds_gov, ds_health, ds_retail_mix) %>%
       pivot_longer(
-        cols = starts_with(“ds_”), names_to = “ds_cat”, values_to = “ds_val”
+        cols = starts_with("ds_"), names_to = "ds_cat", values_to = "ds_val"
       ),
     # 游客。
     combined_data_norm %>%
-      left_join(loc_poi_access, by = c(“id” = “loc_id”)) %>%
-      filter(vis_src == “tourist”) %>%
+      left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+      filter(vis_src == "tourist") %>%
       mutate(
         # Step 2: 加权合成需求指数。
         demand_accomfood = 0.7 * degree_norm + 0.3 * closeness,
@@ -333,12 +333,12 @@ loc_dem_sup <-
         sdi_raw_retail    = retail  / demand_retail,
         sdi_raw_tour      = tourism / demand_tour
       ) %>%
-      mutate(across(starts_with(“sdi_raw_”),
+      mutate(across(starts_with("sdi_raw_"),
                     ~ ifelse(is.infinite(.x) | is.nan(.x), NA, .x))) %>%
       # Step 4: 归一化。
       group_by(vis_src) %>%
       mutate(across(
-        starts_with(“sdi_raw_”),
+        starts_with("sdi_raw_"),
         ~ (.x - min(.x, na.rm = TRUE)) / (max(.x, na.rm = TRUE) - min(.x, na.rm = TRUE))
       )) %>%
       ungroup() %>%
@@ -349,12 +349,12 @@ loc_dem_sup <-
       ) %>%
       select(vis_src, id, season, ds_accomfood_mix, ds_retail_mix, ds_tour_mix) %>%
       pivot_longer(
-        cols = starts_with(“ds_”), names_to = “ds_cat”, values_to = “ds_val”
+        cols = starts_with("ds_"), names_to = "ds_cat", values_to = "ds_val"
       )
   ) %>%
   bind_rows() %>%
   # 获得经纬度和 spa_group 信息。
-  left_join(st_centroid(loc), by = c(“id” = “loc_id”)) %>%
+  left_join(st_centroid(loc), by = c("id" = "loc_id")) %>%
   st_as_sf() %>%
   mutate(long = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
   st_drop_geometry()
