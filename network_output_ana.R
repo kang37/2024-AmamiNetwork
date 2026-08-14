@@ -270,88 +270,91 @@ loc %>%
   write.csv("data_proc/loc_poi_access.csv")
 
 # Demand and supply ----
-# 分客源-季节的各地点各类供需比率。
+# Step 1: 对 degree 进行 min-max 归一化（在 vis_src 组内），
+# 使其与 closeness/harmonic（已由 Gephi 归一化至 [0,1]）量纲一致。
+combined_data_norm <- combined_data %>%
+  group_by(vis_src) %>%
+  mutate(
+    degree_norm = (degree - min(degree, na.rm = TRUE)) /
+                  (max(degree, na.rm = TRUE) - min(degree, na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+# 分客源-季节的各地点供需指数。
 loc_dem_sup <-
   list(
-    # 本地人各项需求。
-    combined_data %>%
-      left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
-      filter(vis_src == "local") %>%
+    # 本地人。
+    combined_data_norm %>%
+      left_join(loc_poi_access, by = c(“id” = “loc_id”)) %>%
+      filter(vis_src == “local”) %>%
       mutate(
-        ds_edu = education / degree,
-        ds_gov = government/ degree,
-        ds_health = health / closeness,
-        ds_retail_close = retail / closeness,
-        ds_retail_harmonic = retail / harmonic
+        # Step 2: 加权合成需求指数（各服务类型对应不同中心度）。
+        demand_edu    = degree_norm,
+        demand_gov    = degree_norm,
+        demand_health = closeness,
+        demand_retail = 0.7 * closeness + 0.3 * harmonic,
+        # Step 3: SDI_raw = 可达性 / 需求指数。
+        sdi_raw_edu    = education  / demand_edu,
+        sdi_raw_gov    = government / demand_gov,
+        sdi_raw_health = health     / demand_health,
+        sdi_raw_retail = retail     / demand_retail
       ) %>%
-      # 将无限大的结果转化为0：对应供给非0而需求为0的地点-季节。
-      mutate(across(contains("ds_"), ~ ifelse(is.infinite(.x), 1, .x))) %>%
-      # 对每个地点的供需比率进行标准化。
+      # 需求为0时 SDI_raw 为 Inf/NaN，替换为 NA。
+      mutate(across(starts_with(“sdi_raw_”),
+                    ~ ifelse(is.infinite(.x) | is.nan(.x), NA, .x))) %>%
+      # Step 4: min-max 归一化获得最终 SDI（在 vis_src 组内）。
       group_by(vis_src) %>%
       mutate(across(
-        contains("ds_"),
-        ~ (.x - min(.x, na.rm = T))/(max(.x, na.rm = T) - min(.x, na.rm = T))
+        starts_with(“sdi_raw_”),
+        ~ (.x - min(.x, na.rm = TRUE)) / (max(.x, na.rm = TRUE) - min(.x, na.rm = TRUE))
       )) %>%
       ungroup() %>%
-      # 对一对多的供需配对，计算供需比率加权平均值。
-      mutate(
-        # 更强调”平均可达性”，harmonic处理偏远点，用于微调。
-        ds_retail_mix = ds_retail_close * 0.7 + ds_retail_harmonic * 0.3
+      rename(
+        ds_edu        = sdi_raw_edu,
+        ds_gov        = sdi_raw_gov,
+        ds_health     = sdi_raw_health,
+        ds_retail_mix = sdi_raw_retail
       ) %>%
-      # 转化为长数据。
-      select(vis_src, id, season, contains("ds")) %>%
-      select(
-        -c(ds_retail_close, ds_retail_harmonic)
-      ) %>%
+      select(vis_src, id, season, ds_edu, ds_gov, ds_health, ds_retail_mix) %>%
       pivot_longer(
-        cols = contains("ds_"), names_to = "ds_cat", values_to = "ds_val"
+        cols = starts_with(“ds_”), names_to = “ds_cat”, values_to = “ds_val”
       ),
-    # 游客各项需求。
-    combined_data %>%
-      left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
-      filter(vis_src == "tourist") %>%
+    # 游客。
+    combined_data_norm %>%
+      left_join(loc_poi_access, by = c(“id” = “loc_id”)) %>%
+      filter(vis_src == “tourist”) %>%
       mutate(
-        ds_accomfood_degree = ac / degree,
-        ds_accomfood_close = ac / closeness,
-        ds_retail_degree = retail / degree,
-        ds_retail_harmonic = retail / harmonic,
-        ds_tour_degree = tourism / degree,
-        ds_tour_close = tourism / closeness,
-        ds_tour_harmonic = tourism / harmonic,
+        # Step 2: 加权合成需求指数。
+        demand_accomfood = 0.7 * degree_norm + 0.3 * closeness,
+        demand_retail    = 0.7 * degree_norm + 0.3 * harmonic,
+        demand_tour      = 0.5 * degree_norm + 0.3 * closeness + 0.2 * harmonic,
+        # Step 3: SDI_raw = 可达性 / 需求指数。
+        sdi_raw_accomfood = ac      / demand_accomfood,
+        sdi_raw_retail    = retail  / demand_retail,
+        sdi_raw_tour      = tourism / demand_tour
       ) %>%
-      # 将无限大的结果转化为0：对应供给非0而需求为0的地点-季节。
-      mutate(across(contains("ds_"), ~ ifelse(is.infinite(.x), 1, .x))) %>%
-      # 对每个地点的供需比率进行标准化。
+      mutate(across(starts_with(“sdi_raw_”),
+                    ~ ifelse(is.infinite(.x) | is.nan(.x), NA, .x))) %>%
+      # Step 4: 归一化。
       group_by(vis_src) %>%
       mutate(across(
-        contains("ds_"),
-        ~ (.x - min(.x, na.rm = T))/(max(.x, na.rm = T) - min(.x, na.rm = T))
+        starts_with(“sdi_raw_”),
+        ~ (.x - min(.x, na.rm = TRUE)) / (max(.x, na.rm = TRUE) - min(.x, na.rm = TRUE))
       )) %>%
       ungroup() %>%
-      # 对一对多的供需配对，计算供需比率加权平均值。
-      mutate(
-        # 游客热度主导，closeness补充反映“是否方便到达”。
-        ds_accomfood_mix = ds_accomfood_degree * 0.7 + ds_accomfood_close * 0.3,
-        # 热度主导，harmonic保留广覆盖性。
-        ds_retail_mix = ds_retail_degree * 0.7 + ds_retail_harmonic * 0.3,
-        # 热度主导 + 中心性支持 + 修正远点。
-        ds_tour_mix =
-          ds_tour_degree * 0.5 + ds_tour_close * 0.3 + ds_tour_harmonic * 0.2
+      rename(
+        ds_accomfood_mix = sdi_raw_accomfood,
+        ds_retail_mix    = sdi_raw_retail,
+        ds_tour_mix      = sdi_raw_tour
       ) %>%
-      # 转化为长数据。
-      select(vis_src, id, season, contains("ds")) %>%
-      select(-c(
-        ds_accomfood_degree, ds_accomfood_close,
-        ds_retail_degree, ds_retail_harmonic,
-        ds_tour_degree, ds_tour_close, ds_tour_harmonic
-      )) %>%
+      select(vis_src, id, season, ds_accomfood_mix, ds_retail_mix, ds_tour_mix) %>%
       pivot_longer(
-        cols = contains("ds_"), names_to = "ds_cat", values_to = "ds_val"
+        cols = starts_with(“ds_”), names_to = “ds_cat”, values_to = “ds_val”
       )
   ) %>%
   bind_rows() %>%
-  # 获得经纬度信息。
-  left_join(st_centroid(loc), by = c("id" = "loc_id")) %>%
+  # 获得经纬度和 spa_group 信息。
+  left_join(st_centroid(loc), by = c(“id” = “loc_id”)) %>%
   st_as_sf() %>%
   mutate(long = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
   st_drop_geometry()
