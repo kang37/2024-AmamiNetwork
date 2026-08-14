@@ -360,6 +360,8 @@ plt_loc_smry <- function(tar_var) {
       names_from = source, values_from = all_of(tar_var), values_fill = 0
     ) %>%
     mutate(vis_2_loc = tourist / local, num = tourist + local) %>%
+    # 按季度内计算分位数，使各季度的分组边界独立。
+    group_by(qua) %>%
     mutate(
       vis_2_loc_quan = cut(
         vis_2_loc,
@@ -368,6 +370,7 @@ plt_loc_smry <- function(tar_var) {
         include.lowest = TRUE
       )
     ) %>%
+    ungroup() %>%
     left_join(loc, by = "loc_id") %>%
     st_as_sf()
   ggplot() +
@@ -435,7 +438,7 @@ png(
       breaks = c(129.1, 129.5), labels = c("129.1E", "129.5E")
     ) +
     labs(
-      col = "Tourist/Local rate quartile",
+      col = "Tourist/Resident rate quartile",
       size = "Daily ID number",
       title = "(c)"
     )
