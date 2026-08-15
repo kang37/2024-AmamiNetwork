@@ -141,7 +141,12 @@ png(
 loc %>%
   st_drop_geometry() %>%
   left_join(
-    combined_data %>% filter(vis_src %in% c("local", "tourist")),
+    combined_data %>%
+      filter(vis_src %in% c("local", "tourist")) %>%
+      group_by(vis_src) %>%
+      mutate(degree = (degree - min(degree, na.rm = TRUE)) /
+               (max(degree, na.rm = TRUE) - min(degree, na.rm = TRUE))) %>%
+      ungroup(),
     by = c("loc_id" = "id")
   ) %>%
   select(
@@ -165,7 +170,8 @@ loc %>%
   ) %>%
   ggplot() +
   geom_point(aes(spa_group, cen_val, col = as.factor(season)), alpha = 0.8) +
-  facet_grid(centrality ~ vis_src, scale = "free") +
+  facet_grid(centrality ~ vis_src) +
+  scale_y_continuous(limits = c(0.1, 0.7)) +
   labs(x = "Location cluster", y = "Centrality", col = "Quarter") +
   scale_color_manual(values = c(
     "1" = "#FF9EBC", "2" = "#4DAF4A", "3" = "#E41A1C", "4" = "#377EB8"
