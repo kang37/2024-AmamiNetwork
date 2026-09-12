@@ -4,6 +4,7 @@ library(stringr)
 library(readxl)
 library(scatterpie)
 library(ggsci)
+library(patchwork)
 
 # 获取所有csv文件路径。
 file_paths <- list.files(
@@ -120,7 +121,7 @@ plt_demand_map <- function(visitor_x) {
 }
 # 居民各季节各项中心度。
 png(
-  "data_proc/loc_demand_map_local.png",
+  "data_proc/loc_demand_map_resident.png",
   width = 3000, height = 2000, res = 300
 )
 plt_demand_map("local")
@@ -133,12 +134,69 @@ png(
 plt_demand_map("tourist")
 dev.off()
 
-# 第三部分：各用户群体不同地点组团中分季度中心度的中值对比。
+# 各中心度季节均值地图：2行（Resident/Tourist）× 3列（Degree/Closeness/Harmonic）。
+p_map <- loc %>%
+  st_centroid() %>%
+  left_join(
+    combined_data %>%
+      filter(vis_src %in% c("local", "tourist")) %>%
+      group_by(id, vis_src) %>%
+      summarise(
+        across(c(degree, closeness, harmonic), mean, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = c("loc_id" = "id")
+  ) %>%
+  select("loc_id", "spa_group", "vis_src", "degree", "closeness", "harmonic") %>%
+  filter(!is.na(vis_src)) %>%
+  pivot_longer(
+    cols = c(degree, closeness, harmonic),
+    names_to = "centrality",
+    values_to = "cen_val"
+  ) %>%
+  group_by(centrality, vis_src) %>%
+  mutate(
+    cen_val_normalized = (cen_val - min(cen_val, na.rm = TRUE)) /
+      (max(cen_val, na.rm = TRUE) - min(cen_val, na.rm = TRUE))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    spa_group = factor(spa_group, levels = c(
+      "north", "tatsugo", "airport", "city",
+      "mangrove", "mid", "uken", "setouchi"
+    )),
+    vis_src = recode(vis_src, "local" = "Resident", "tourist" = "Tourist"),
+    centrality = str_to_title(centrality)
+  ) %>%
+  ggplot() +
+  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(aes(size = cen_val_normalized, col = spa_group), alpha = 0.6) +
+  scale_color_npg(labels = function(x) str_to_title(x)) +
+  scale_x_continuous(
+    breaks = c(129.1, 129.3, 129.5, 129.7),
+    labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+  ) +
+  labs(col = "Location cluster") +
+  scale_size_continuous(name = "Normalized centrality", range = c(0.1, 3)) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    panel.grid = element_line(color = "white"),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9)
+  ) +
+  facet_grid(centrality ~ vis_src)
+
 png(
-  paste0("data_proc/loc_cen_mid_", Sys.Date(), ".png"),
-  width = 1400, height = 1000, res = 300
+  paste0("data_proc/loc_demand_map_avg_", Sys.Date(), ".png"),
+  width = 1800, height = 2500, res = 300
 )
-loc %>%
+print(p_map)
+dev.off()
+
+# 第三部分：各用户群体不同地点组团中分季度中心度的中值对比。
+# 2行（Resident/Tourist）× 3列（Degree/Closeness/Harmonic），瘦长版。
+p_cen <- loc %>%
   st_drop_geometry() %>%
   left_join(
     combined_data %>%
@@ -153,6 +211,7 @@ loc %>%
     "loc_id", "spa_group", "vis_src", "season",
     "degree", "closeness", "harmonic"
   ) %>%
+  filter(!is.na(vis_src)) %>%
   group_by(vis_src, spa_group, season) %>%
   summarise(
     across(c(degree, closeness, harmonic), function(x) median(x, na.rm = TRUE)),
@@ -165,19 +224,72 @@ loc %>%
   ) %>%
   mutate(
     spa_group = str_to_title(spa_group),
-    vis_src = str_to_title(vis_src),
+    vis_src = recode(vis_src, "local" = "Resident", "tourist" = "Tourist"),
     centrality = str_to_title(centrality)
   ) %>%
   ggplot() +
-  geom_point(aes(spa_group, cen_val, col = as.factor(season)), alpha = 0.8) +
+  geom_point(
+    aes(spa_group, cen_val, col = as.factor(season)),
+    position = position_dodge(width = 0.4), alpha = 0.8
+  ) +
   facet_grid(centrality ~ vis_src) +
-  scale_y_continuous(limits = c(0.1, 0.7)) +
+  coord_cartesian(ylim = c(0, 1)) +
   labs(x = "Location cluster", y = "Centrality", col = "Quarter") +
   scale_color_manual(values = c(
     "1" = "#FF9EBC", "2" = "#4DAF4A", "3" = "#E41A1C", "4" = "#377EB8"
   )) +
   theme_bw() +
-  theme(axis.text.x = element_text(angle = 90))
+  theme(
+    axis.text.x = element_text(angle = 90),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9)
+  )
+
+png(
+  paste0("data_proc/loc_cen_mid_", Sys.Date(), ".png"),
+  width = 1200, height = 2000, res = 300
+)
+print(p_cen)
+dev.off()
+
+# 合并地图（左）与中心度点图（右），两图均为3行×2列，行方向对齐。
+# 仅在合并图中放大文字和点，不影响单独保存的图。
+p_map_comb <- p_map +
+  theme(
+    text          = element_text(size = 14),
+    axis.text     = element_text(size = 14),
+    strip.text    = element_text(size = 16),
+    axis.title    = element_text(size = 16),
+    legend.text   = element_text(size = 14),
+    legend.title  = element_text(size = 16)
+  )
+
+p_cen_comb <- p_cen
+p_cen_comb$layers[[1]]$aes_params$size <- 3.5   # 放大点（用户已调整）
+p_cen_comb <- p_cen_comb +
+  theme(
+    text         = element_text(size = 14),
+    axis.text    = element_text(size = 14),
+    strip.text   = element_text(size = 16),
+    axis.text.x  = element_text(size = 14, angle = 90, hjust = 1),
+    axis.title   = element_text(size = 16),
+    axis.title.x = element_blank(),
+    legend.text  = element_text(size = 14),
+    legend.title = element_text(size = 16)
+  )
+
+png(
+  paste0("data_proc/loc_demand_cen_combined_", Sys.Date(), ".png"),
+  width = 4000, height = 2200, res = 300
+)
+print(
+  p_map_comb + p_cen_comb +
+    plot_layout(widths = c(1, 1)) +
+    plot_annotation(
+      tag_levels = "a", tag_prefix = "(", tag_suffix = ")",
+      theme = theme(plot.tag = element_text(size = 16))
+    )
+)
 dev.off()
 
 # Supply ----
@@ -211,8 +323,9 @@ proc_poi_sheet <- function(sheet_name) {
     rename_with(~ c("loc_id", poi_type))
 }
 
-# 处理所有POI可达性表格，并合并结果。
-loc_poi_access <- lapply(excel_sheets(poi_file_path), proc_poi_sheet) %>%
+# 仅处理当前研究使用的六类服务，并合并结果。
+poi_service_sheets <- c("Sheet1", "Sheet2", "Sheet3", "Sheet4", "Sheet7", "Sheet8")
+loc_poi_access <- lapply(poi_service_sheets, proc_poi_sheet) %>%
   reduce(left_join, by = "loc_id") %>%
   rename_with(~ tolower(.x))
 # 查看各地点可达性。
@@ -226,10 +339,11 @@ png(
   "data_proc/loc_poi_access_map.png",
   width = 3000, height = 2000, res = 300
 )
-ggplot() +
+p_access <- ggplot() +
   geom_sf(data = amami, col = "lightgrey") +
   geom_sf(
     data = loc %>%
+      filter(!grepl("^ka", loc_id)) %>%
       st_centroid() %>%
       left_join(loc_poi_access, by = "loc_id") %>%
       select(loc_id, spa_group, all_of(access_cols)) %>%
@@ -243,13 +357,24 @@ ggplot() +
           "north", "tatsugo", "airport", "city",
           "mangrove", "mid", "uken", "setouchi"
         )),
-        poi = case_when(
-          poi == "ac" ~ "Accommodation & Food",
-          poi == "education" ~ "Education",
-          poi == "government" ~ "Government",
-          poi == "health" ~ "Health",
-          poi == "retail" ~ "Commerce",
-          poi == "tourism" ~ "Tourism & Recreation",
+        poi = factor(
+          recode(
+            poi,
+            "government" = "Government",
+            "education" = "Community",
+            "health" = "Health",
+            "retail" = "Commercial",
+            "ac" = "Accommodation & food",
+            "tourism" = "Recreation"
+          ),
+          levels = c(
+            "Government",
+            "Community",
+            "Health",
+            "Commercial",
+            "Accommodation & food",
+            "Recreation"
+          )
         )
       ),
     aes(size = Accessibility, col = spa_group), alpha = 0.6
@@ -262,10 +387,15 @@ ggplot() +
   ) +
   theme_bw() +
   theme(
+    text = element_text(size = 16.5),
     axis.text.x = element_text(angle = 90),
     panel.grid = element_line(color = "white")
   ) +
-  facet_wrap(.~ poi, nrow = 2)
+  facet_wrap(
+    .~ poi, nrow = 2,
+    labeller = labeller(poi = label_wrap_gen(width = 20))
+  )
+print(p_access)
 dev.off()
 
 # 导出对应数据。
@@ -274,6 +404,102 @@ loc %>%
   left_join(loc_poi_access, by = "loc_id") %>%
   select(loc_id, all_of(access_cols)) %>%
   write.csv("data_proc/loc_poi_access.csv")
+
+# 表1：六类服务可达性的描述统计。
+service_labels <- c(
+  government = "Government",
+  education = "Community",
+  health = "Health",
+  retail = "Commercial",
+  ac = "Accommodation & food",
+  tourism = "Recreation"
+)
+
+access_cluster_data <- loc %>%
+  st_drop_geometry() %>%
+  filter(!grepl("^ka", loc_id)) %>%
+  select(loc_id, spa_group) %>%
+  left_join(loc_poi_access, by = "loc_id")
+
+access_table_data <- access_cluster_data %>%
+  select(loc_id, all_of(names(service_labels)))
+
+accessibility_service_summary <- map_dfr(
+  names(service_labels),
+  function(service_name) {
+    service_value <- access_table_data[[service_name]]
+    tibble(
+      Service = unname(service_labels[[service_name]]),
+      Median = median(service_value, na.rm = TRUE),
+      Mean = mean(service_value, na.rm = TRUE),
+      Minimum = min(service_value, na.rm = TRUE),
+      Maximum = max(service_value, na.rm = TRUE),
+      Variance = var(service_value, na.rm = TRUE)
+    )
+  }
+)
+
+write.csv(
+  accessibility_service_summary,
+  "data_proc/loc_accessibility_service_summary.csv",
+  row.names = FALSE
+)
+
+# 表2：各 cluster 的六类服务可达性中位数。
+accessibility_cluster_median <- access_cluster_data %>%
+  group_by(spa_group) %>%
+  summarise(
+    across(all_of(names(service_labels)), ~ median(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  rename_with(
+    ~ unname(service_labels[.x]),
+    all_of(names(service_labels))
+  ) %>%
+  rename(Cluster = spa_group)
+
+write.csv(
+  accessibility_cluster_median,
+  "data_proc/loc_accessibility_cluster_median.csv",
+  row.names = FALSE
+)
+
+# 表3：每类服务内按 cluster 中位可达性从高到低排序。
+accessibility_cluster_ranking <- accessibility_cluster_median %>%
+  pivot_longer(
+    cols = -Cluster,
+    names_to = "Service",
+    values_to = "Median_accessibility"
+  ) %>%
+  mutate(Service = factor(Service, levels = unname(service_labels))) %>%
+  group_by(Service) %>%
+  arrange(desc(Median_accessibility), Cluster, .by_group = TRUE) %>%
+  mutate(Rank = row_number()) %>%
+  ungroup() %>%
+  select(Rank, Service, Cluster) %>%
+  pivot_wider(names_from = Service, values_from = Cluster) %>%
+  arrange(Rank)
+
+write.csv(
+  accessibility_cluster_ranking,
+  "data_proc/loc_accessibility_cluster_ranking.csv",
+  row.names = FALSE
+)
+
+# 表4：六类服务可达性的两两 Spearman 相关系数。
+accessibility_spearman <- cor(
+  access_table_data %>% select(all_of(names(service_labels))),
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+rownames(accessibility_spearman) <- unname(service_labels)
+colnames(accessibility_spearman) <- unname(service_labels)
+
+write.csv(
+  accessibility_spearman,
+  "data_proc/loc_accessibility_spearman.csv",
+  row.names = TRUE
+)
 
 # Demand and supply ----
 # Step 1: 对 degree 进行 min-max 归一化（在 vis_src 组内），
@@ -364,6 +590,284 @@ loc_dem_sup <-
   st_as_sf() %>%
   mutate(long = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
   st_drop_geometry()
+
+# 基于固定阈值识别相对供需错配：高需求（Q75及以上）且低可达性（Q25及以下）。
+# 阈值在每个用户组 × 服务类型的全部地点和四个季度中统一计算，
+# 因此不会强制每个季度产生固定数量的“短缺”地点。
+loc_mismatch <- list(
+  # 居民使用的服务。
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "local") %>%
+    transmute(vis_src, id, season, ds_cat = "ds_edu",
+              demand = degree_norm, accessibility = education),
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "local") %>%
+    transmute(vis_src, id, season, ds_cat = "ds_gov",
+              demand = degree_norm, accessibility = government),
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "local") %>%
+    transmute(vis_src, id, season, ds_cat = "ds_health",
+              demand = closeness, accessibility = health),
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "local") %>%
+    transmute(
+      vis_src, id, season, ds_cat = "ds_retail_mix",
+      demand = 0.7 * closeness + 0.3 * harmonic,
+      accessibility = retail
+    ),
+  # 游客使用的服务。
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "tourist") %>%
+    transmute(
+      vis_src, id, season, ds_cat = "ds_accomfood_mix",
+      demand = 0.7 * degree_norm + 0.3 * closeness,
+      accessibility = ac
+    ),
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "tourist") %>%
+    transmute(
+      vis_src, id, season, ds_cat = "ds_retail_mix",
+      demand = 0.7 * degree_norm + 0.3 * harmonic,
+      accessibility = retail
+    ),
+  combined_data_norm %>%
+    left_join(loc_poi_access, by = c("id" = "loc_id")) %>%
+    filter(vis_src == "tourist") %>%
+    transmute(
+      vis_src, id, season, ds_cat = "ds_tour_mix",
+      demand = 0.5 * degree_norm + 0.3 * closeness + 0.2 * harmonic,
+      accessibility = tourism
+    )
+) %>%
+  bind_rows() %>%
+  filter(!is.na(demand), !is.na(accessibility)) %>%
+  group_by(vis_src, ds_cat) %>%
+  mutate(
+    demand_q75 = quantile(demand, 0.75, na.rm = TRUE),
+    accessibility_q25 = quantile(accessibility, 0.25, na.rm = TRUE),
+    demand_percentile = percent_rank(demand),
+    accessibility_percentile = percent_rank(accessibility),
+    mismatch_severity = pmax(demand_percentile - accessibility_percentile, 0),
+    is_mismatch = demand >= demand_q75 & accessibility <= accessibility_q25
+  ) %>%
+  ungroup() %>%
+  left_join(
+    st_centroid(loc) %>%
+      filter(!grepl("^ka", loc_id)) %>%
+      select(loc_id, spa_group),
+    by = c("id" = "loc_id")
+  ) %>%
+  st_as_sf() %>%
+  mutate(
+    long = st_coordinates(.)[, 1],
+    lat = st_coordinates(.)[, 2]
+  ) %>%
+  st_drop_geometry()
+
+# 导出完整的连续指标和二元错配判定，供复核与敏感性分析。
+write.csv(
+  loc_mismatch,
+  "data_proc/loc_supply_demand_mismatch.csv",
+  row.names = FALSE
+)
+
+# 使用原有的饼图地图样式绘制相对供需错配。
+ds_mismatch_label <- c(
+  "ds_accomfood_mix" = "Accommodation & food",
+  "ds_retail_mix" = "Commercial",
+  "ds_edu" = "Community",
+  "ds_gov" = "Government",
+  "ds_health" = "Health",
+  "ds_tour_mix" = "Recreation"
+)
+
+plt_mismatch_map <- function(vis_src_x) {
+  plt_data <- loc_mismatch %>%
+    filter(vis_src == vis_src_x, is_mismatch) %>%
+    mutate(
+      season = factor(season, levels = 1:4),
+      ds_val_fill = 1
+    ) %>%
+    pivot_wider(
+      id_cols = c(id, season, long, lat),
+      names_from = ds_cat,
+      values_from = ds_val_fill,
+      values_fill = 0
+    ) %>%
+    mutate(radius = 0.02)
+
+  p <- ggplot(data = tibble(season = factor(1:4, levels = 1:4))) +
+    geom_sf(data = amami, fill = "white") +
+    geom_sf(
+      data = st_centroid(loc) %>% filter(!grepl("^ka", loc_id)),
+      size = 1, col = "darkgrey", alpha = 0.8
+    )
+
+  if (nrow(plt_data) > 0) {
+    p <- p + geom_scatterpie(
+      data = plt_data,
+      aes(x = long, y = lat, r = radius),
+      cols = grep("^ds_", names(plt_data), value = TRUE),
+      linewidth = 0.1, color = "white", alpha = 0.9
+    )
+  }
+
+  p +
+    scale_fill_npg(labels = ds_mismatch_label) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    labs(fill = "Service") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90),
+      panel.grid = element_line(color = "white")
+    ) +
+    facet_wrap(
+      .~ season, nrow = 1, drop = FALSE,
+      labeller = labeller(season = c(
+        "1" = "Quarter 1", "2" = "Quarter 2",
+        "3" = "Quarter 3", "4" = "Quarter 4"
+      ))
+    )
+}
+
+png(
+  paste0("data_proc/ds_mismatch_map_local_", Sys.Date(), ".png"),
+  width = 3500, height = 1000, res = 300
+)
+print(plt_mismatch_map("local"))
+dev.off()
+
+png(
+  paste0("data_proc/ds_mismatch_map_tourist_", Sys.Date(), ".png"),
+  width = 3500, height = 1000, res = 300
+)
+print(plt_mismatch_map("tourist"))
+dev.off()
+
+# 多组分位数阈值的敏感性分析：由宽松到严格。
+mismatch_thresholds <- tibble(
+  demand_prob = c(0.60, 0.65, 0.70, 0.75, 0.80),
+  accessibility_prob = c(0.40, 0.35, 0.30, 0.25, 0.20),
+  threshold = factor(
+    c("Q60/Q40", "Q65/Q35", "Q70/Q30", "Q75/Q25", "Q80/Q20"),
+    levels = c("Q60/Q40", "Q65/Q35", "Q70/Q30", "Q75/Q25", "Q80/Q20")
+  )
+)
+
+loc_mismatch_sensitivity <- loc_mismatch %>%
+  select(vis_src, id, season, ds_cat, demand, accessibility,
+         spa_group, long, lat) %>%
+  crossing(mismatch_thresholds) %>%
+  group_by(vis_src, ds_cat, demand_prob, accessibility_prob, threshold) %>%
+  mutate(
+    demand_threshold = quantile(demand, demand_prob[[1]], na.rm = TRUE),
+    accessibility_threshold = quantile(
+      accessibility, accessibility_prob[[1]], na.rm = TRUE
+    ),
+    is_mismatch = demand >= demand_threshold &
+      accessibility <= accessibility_threshold
+  ) %>%
+  ungroup()
+
+# 各阈值、用户组、季度和服务的 mismatch 数量。
+mismatch_sensitivity_counts <- loc_mismatch_sensitivity %>%
+  filter(is_mismatch) %>%
+  count(threshold, demand_prob, accessibility_prob,
+        vis_src, season, ds_cat, name = "mismatch_n") %>%
+  complete(
+    threshold = mismatch_thresholds$threshold,
+    vis_src = c("local", "tourist"),
+    season = 1:4,
+    ds_cat,
+    fill = list(mismatch_n = 0)
+  ) %>%
+  arrange(threshold, vis_src, season, ds_cat)
+
+write.csv(
+  mismatch_sensitivity_counts,
+  "data_proc/loc_mismatch_sensitivity_counts.csv",
+  row.names = FALSE
+)
+
+plt_mismatch_sensitivity <- function(vis_src_x) {
+  threshold_levels <- levels(mismatch_thresholds$threshold)
+  plt_data <- loc_mismatch_sensitivity %>%
+    filter(vis_src == vis_src_x, is_mismatch) %>%
+    mutate(
+      season = factor(season, levels = 1:4),
+      threshold = factor(threshold, levels = threshold_levels),
+      ds_val_fill = 1
+    ) %>%
+    pivot_wider(
+      id_cols = c(threshold, id, season, long, lat),
+      names_from = ds_cat,
+      values_from = ds_val_fill,
+      values_fill = 0
+    ) %>%
+    mutate(radius = 0.02)
+
+  p <- ggplot(data = expand_grid(
+    threshold = factor(threshold_levels, levels = threshold_levels),
+    season = factor(1:4, levels = 1:4)
+  )) +
+    geom_sf(data = amami, fill = "white") +
+    geom_sf(
+      data = st_centroid(loc) %>% filter(!grepl("^ka", loc_id)),
+      size = 1, col = "darkgrey", alpha = 0.8
+    )
+
+  if (nrow(plt_data) > 0) {
+    p <- p + geom_scatterpie(
+      data = plt_data,
+      aes(x = long, y = lat, r = radius),
+      cols = grep("^ds_", names(plt_data), value = TRUE),
+      linewidth = 0.1, color = "white", alpha = 0.9
+    )
+  }
+
+  p +
+    scale_fill_npg(labels = ds_mismatch_label) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    labs(fill = "Service") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90),
+      panel.grid = element_line(color = "white")
+    ) +
+    facet_grid(
+      threshold ~ season, drop = FALSE,
+      labeller = labeller(season = c(
+        "1" = "Quarter 1", "2" = "Quarter 2",
+        "3" = "Quarter 3", "4" = "Quarter 4"
+      ))
+    )
+}
+
+png(
+  paste0("data_proc/ds_mismatch_sensitivity_local_", Sys.Date(), ".png"),
+  width = 3500, height = 4500, res = 300
+)
+print(plt_mismatch_sensitivity("local"))
+dev.off()
+
+png(
+  paste0("data_proc/ds_mismatch_sensitivity_tourist_", Sys.Date(), ".png"),
+  width = 3500, height = 4500, res = 300
+)
+print(plt_mismatch_sensitivity("tourist"))
+dev.off()
 
 # 挑选出各客源-季节-需求中，供需比率最低的地点。
 loc_dem_sup_min <- loc_dem_sup %>%
