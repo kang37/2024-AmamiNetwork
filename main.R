@@ -9,12 +9,29 @@ showtext_auto()
 # tar_make()
 tar_load(agoop_amami)
 tar_load(amami)
+
+# 提取奄美大岛主岛多边形（amami 为 MULTIPOLYGON，包含加計呂麻島等离岛；
+# 按面积取最大的单一多边形，即奄美大岛本岛，用于裁剪道路和POI数据）。
+amami_main <- amami %>%
+  st_cast("POLYGON") %>%
+  mutate(area = st_area(.)) %>%
+  slice_max(area, n = 1) %>%
+  select(-area) %>%
+  st_transform(6668)
+
 # 自定义目标地点。
 loc <- st_read("data_raw/loc/loc62.shp") %>%
   # 计算每个定义地点的面积，单位为平方米。
   st_make_valid() %>%
   mutate(loc_area = st_area(.) %>% as.numeric()) %>%
-  st_transform(6668)
+  st_transform(6668) %>%
+  # 删除加計呂麻島（kakeromajima）：人口过少，POI可达性数据缺失，与主岛交通不连续。
+  filter(spa_group != "kakeromajima")
+
+# 从轨迹数据中同步删除加計呂麻島的轨迹点（agoop_amami仅含loc_id，无loc_area，
+# ka*节点在loc中已被删除，若不同步过滤则后续join会产生NA，导致分析出错）。
+agoop_amami <- agoop_amami %>%
+  filter(is.na(loc_id) | !grepl("^ka", loc_id))
 
 # 对每个地点，计算其包含的轨迹点个数、涉及的人数。
 # Bug: 后面有同名变量。
@@ -53,6 +70,11 @@ loc_smry <- left_join(
   # 单位DailyID地点滞留时间中位数计算。
   agoop_amami %>%
     st_drop_geometry() %>%
+    # agoop_amami仅有loc_id（QGIS空间连接只加入loc_id），需从loc补充loc_area。
+    left_join(
+      loc %>% st_drop_geometry() %>% select(loc_id, loc_area),
+      by = "loc_id"
+    ) %>%
     # 先计算每个DailyID的地点滞留时间。
     group_by(source, qua, dailyid, loc_id, loc_area) %>%
     summarise(
@@ -115,12 +137,13 @@ png(
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(
     data = st_as_sf(st_centroid(loc)) %>%
       mutate(spa_group = factor(spa_group, levels = c(
         "north", "tatsugo", "airport", "city",
-        "mangrove", "mid", "uken", "setouchi", "kakeromajima"
+        "mangrove", "mid", "uken", "setouchi"
       ))),
     aes(col = spa_group)
   ) +
@@ -148,9 +171,16 @@ png(
 )
 set.seed(1234)
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  # 离岛（加計呂麻島等）用极浅灰色显示，表示不在研究范围内。
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  # 主岛用正常浅灰色覆盖在上层。
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(
-    data = st_jitter(sample_n(agoop_amami, size = 10000), 0.001),
+    # 先空间裁剪至主岛，再取样，排除加計呂麻島轨迹点（loc_id=NA者也可能落在离岛）。
+    data = st_jitter(
+      agoop_amami %>% st_intersection(amami_main) %>% sample_n(size = 10000),
+      0.001
+    ),
     size = 0.1, col = "black", alpha = 0.8
   ) +
   scale_x_continuous(
@@ -173,13 +203,17 @@ road <- st_read("data_raw/osm_amami_road/研究范围内的道路.shp") %>%
     road_class = factor(road_class, levels = c(
       "primary", "secondary", "tertiary", "others"
     ))
-  )
+  ) %>%
+  # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛道路。
+  # 道路数据为CRS 4326，需先将amami_main转换后再做空间裁剪。
+  st_intersection(st_transform(amami_main, 4326))
 png(
   paste0("data_proc/road_", Sys.Date(), ".png"),
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   geom_sf(data = road, aes(col = road_class)) +
   labs(col = "Class") +
   scale_x_continuous(
@@ -229,7 +263,12 @@ all_poi <- file_list %>%
     temp_sf <- temp_sf %>% mutate(poi_type = type_name)
 
     return(temp_sf)
-  })
+  }) %>%
+  # 排除Public Amenities（仅13个：厕所/长椅/自动贩卖机，不纳入分析）。
+  filter(poi_type != "Public_Amenities_and_Utilities") %>%
+  # 裁剪至奄美大岛主岛，排除加計呂麻島等离岛POI。
+  # POI数据为CRS 4326，需先将amami_main转换后再做空间裁剪。
+  st_intersection(st_transform(amami_main, 4326))
 
 # 绘图。
 png(
@@ -237,7 +276,8 @@ png(
   width = 1000, height = 1200, res = 300
 )
 ggplot() +
-  geom_sf(data = amami, col = "lightgrey") +
+  geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+  geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
   # 绘制 POI 点，根据类别着色。
   geom_sf(data = all_poi, aes(color = poi_type), size = 0.5, alpha = 0.7) +
   scale_color_tableau(
@@ -273,6 +313,44 @@ ggplot() +
   )
 dev.off()
 
+# 各类POI单独出图。
+walk(unique(all_poi$poi_type), function(type_x) {
+  # 简化标签：去除后缀词，转为标题格式。
+  label_x <- type_x %>%
+    str_replace_all("_", " ") %>%
+    str_remove_all(regex(" services| facilities| and utilities", ignore_case = TRUE)) %>%
+    str_squish() %>%
+    str_to_title()
+  png(
+    paste0("data_proc/poi_", type_x, "_", Sys.Date(), ".png"),
+    width = 1000, height = 1200, res = 300
+  )
+  p <- ggplot() +
+    geom_sf(data = amami, fill = "#E8E8E8", col = NA) +
+    geom_sf(data = amami_main, fill = "lightgrey", col = NA) +
+    geom_sf(
+      data = all_poi %>% filter(poi_type == type_x),
+      color = "steelblue", size = 1, alpha = 0.8
+    ) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    annotate(
+      "label",
+      x = Inf, y = Inf,
+      label = label_x,
+      hjust = 1.05, vjust = 1.05,
+      size = 3, fill = "white",
+      label.size = 0.4, label.r = unit(0, "lines")
+    ) +
+    coord_sf() +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank())
+  print(p)
+  dev.off()
+})
+
 ## 图3 ----
 # 函数：各地点轨迹点数或人数，并显示游客和本地人比例作图。
 plt_loc_smry <- function(tar_var) {
@@ -282,6 +360,8 @@ plt_loc_smry <- function(tar_var) {
       names_from = source, values_from = all_of(tar_var), values_fill = 0
     ) %>%
     mutate(vis_2_loc = tourist / local, num = tourist + local) %>%
+    # 按季度内计算分位数，使各季度的分组边界独立。
+    group_by(qua) %>%
     mutate(
       vis_2_loc_quan = cut(
         vis_2_loc,
@@ -290,6 +370,7 @@ plt_loc_smry <- function(tar_var) {
         include.lowest = TRUE
       )
     ) %>%
+    ungroup() %>%
     left_join(loc, by = "loc_id") %>%
     st_as_sf()
   ggplot() +
@@ -357,7 +438,7 @@ png(
       breaks = c(129.1, 129.5), labels = c("129.1E", "129.5E")
     ) +
     labs(
-      col = "Tourist/Local rate quartile",
+      col = "Tourist/Resident rate quartile",
       size = "Daily ID number",
       title = "(c)"
     )
