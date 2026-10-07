@@ -1,0 +1,312 @@
+---
+title: "62地点分析报告"
+author: "Kang"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| echo: false
+library(knitr)
+library(cowplot)
+library(ggradar)
+opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+## 数据处理
+
+原始数据为2018年间到达奄美群岛的所有手机用户每天的轨迹。原始数据为来自[Agoop公司的人口流动点数据](https://agoop.co.jp/service/dynamic-population-data/)，是每个用户在一天中不同时刻的位置信息。有些人轨迹比较多，有些人被收集到的轨迹比较少，所以需要对数据进行清理。数据清理过程主要包括如下步骤。
+
+-   由于研究区域是奄美大岛和加计吕麻岛，因此首先将这两个岛屿范围之外的轨迹点去除。
+
+-   从原始数据中去除轨迹点特别少的用户，因为如果轨迹点太少，我们无法分析其每天的移动轨迹。
+
+-   由于主要活动时间段为上午4时到晚上10时，因此这些时间段之外的轨迹点也去除；对于每个用户，只保留每10分钟内最早的一个数据点，使每个用户的数据密度相对一致。
+
+对于数据，需要注意的是，这里的"用户"是指一天内的一位独立用户，例如，有个人两天都待在奄美群岛上，则会被识别为两个用户号（在数据中被称为"daily ID"）。
+
+## 数据描述
+
+研究区域地图（包含62地点位置）、轨迹点分布状况等见附件图片。62个地点及其分组（北部组团、空港组团、城市组团、宇检村组团等）情况如下图。之后需要将加计吕麻岛南边岛两个小岛屿删除。
+
+```{r}
+ggplot() + 
+  geom_sf(data = amami, fill = "white") + 
+  geom_sf(data = st_centroid(loc), aes(col = spa_group), alpha = 0.7) + 
+  theme_bw()
+```
+
+各个组团包含的节点数量如下。
+
+```{r}
+table(loc$spa_group)
+```
+
+筛选后的Agoop数据的条数（轨迹点数量）和daily ID数如下。
+
+```{r}
+cat(
+  "原始数据条数：", nrow(agoop_amami), "\n", 
+  "原始数据中涉及的daily ID数：", length(unique(agoop_amami$dailyid)), "\n", 
+  "本地人和游客的轨迹点数量：", "\n"
+)
+table(st_drop_geometry(agoop_amami)$source)
+cat("本地人和游客的daily ID数量：", "\n")
+table(distinct(select(st_drop_geometry(agoop_amami), source, dailyid))$source)
+```
+
+各季节各客源的daily ID数量如下。
+
+```{r}
+agoop_amami %>%
+  st_drop_geometry() %>%
+  group_by(source, qua, month) %>%
+  summarise(dailyid_num = length(unique(dailyid)), .groups = "drop") %>%
+  ggplot() +
+  geom_col(aes(month, dailyid_num, fill = qua)) +
+  scale_fill_manual(
+    breaks = as.character(1:4),
+    values = c("#D3A9C5", "#8CD3D6", "#F0B29D", "#7BABDD")
+  ) +
+  scale_x_continuous(breaks = 1:12, labels = 1:12) +
+  facet_wrap(.~ source, labeller = labeller(source = c(
+    "all" = "All", "local" = "Local", "tourist" = "Tourist"
+  ))) +
+  labs(x = "Month", y = "Numbe of daily ID", fill = "Quarter") +
+  theme_bw() +
+  theme(
+    legend.position = "top",
+    panel.grid.major = element_blank()
+  )
+```
+
+对应数据如下表。
+
+```{r}
+agoop_amami %>%
+  st_drop_geometry() %>%
+  group_by(source, qua, month) %>%
+  summarise(dailyid_num = length(unique(dailyid)), .groups = "drop") %>% 
+  select(-qua) %>% 
+  pivot_wider(names_from = source, values_from = dailyid_num) %>% 
+  kable()
+```
+
+## 地点网络指标
+
+对于每个组团中的各个地点，不同客源、季度的中心度指标不同。可以用箱形图加统计对比，在此基础上用跳动点表示原始数据，点颜色表示季度。可见城市组团的节点各个网络指标都比较高。**问题：可以看出一些差异，如游客的空港-市中心差异比较小，且游客相对而言去市中心之外的其他地方更多，但是如何比较这种差异？统计分析？**
+
+```{r fig.height=10}
+lapply(
+  c("indegree", "outdegree", "degree", "betweeness", "closeness", "harmonic"), 
+  function(x) {
+    combined_data %>% 
+  left_join(st_drop_geometry(loc), by = c("id" = "loc_id")) %>% 
+  ggplot(aes(spa_group, get(x))) + 
+      geom_boxplot() +
+  geom_jitter(aes(col = as.character(season)), alpha = 0.6, width = 0.1) + 
+  facet_wrap(.~ vis_src, ncol = 1) + 
+  theme_bw() + 
+      theme(axis.text.x = element_text(angle = 90)) + 
+  labs(y = x, x = "Zone", col = "Season") + 
+      theme(
+        legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90)
+      )
+  }
+) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 2)
+```
+
+各组团各种指数的中位数如下。
+
+```{r}
+combined_data %>% 
+  left_join(st_drop_geometry(loc), by = c("id" = "loc_id")) %>% 
+  group_by(vis_src, spa_group) %>% 
+  summarise(across(
+    c(indegree, outdegree, degree, closeness, harmonic, betweeness), 
+    ~ median(.x)
+  )) %>% 
+  kable()
+```
+
+网络指标的空间分布如下（以indegree为例）。
+
+```{r}
+ggplot() + 
+  geom_sf(data = amami, alpha = 0.5) + 
+  geom_sf(data = loc %>% 
+  st_centroid() %>% 
+  left_join(combined_data, by = c("loc_id" = "id")), aes(size = indegree), alpha = 0.5) + 
+  scale_size_continuous(range = c(0.1, 1.5)) + 
+  theme_bw() + 
+  facet_grid(vis_src ~ season)
+```
+
+如果要比较不同客源的差异，可以用游客的指数数值除以本地人的数值。点比较大的是游客比较倾向于去的地方，比较小的是本地人比较倾向于去的地方。问题：需要找到一个更好的比较方法。
+
+```{r}
+loc %>% 
+  st_centroid() %>% 
+  left_join(
+    combined_data %>% 
+      select(vis_src, season, id, indegree) %>% 
+      pivot_wider(
+        names_from = vis_src, values_from = indegree
+      ) %>% 
+      mutate(tour_local_rate = tourist / local), 
+    by = c("loc_id" = "id")
+  ) %>% 
+  ggplot() + 
+  geom_sf(aes(size = tour_local_rate), alpha = 0.5) + 
+  scale_size_continuous(range = c(0.1, 3)) + 
+  theme_bw() + 
+  facet_wrap(.~ season)
+```
+
+## 地点聚类
+
+根据各地点的网络指标（目前选择了6个），可在各客源各季节下，对地点进行聚类分析。由于所有网络指标均为连续型变量，因此此处采用k-means聚类分析。和所有非监督聚类一样，在开始聚类之前，需要指定聚类后类别的数量。可以根据多种方法获得最佳聚类数量（此处略）。经分析，大部分客源-季节下，最佳聚类数量是3-4个，为了保持一致性，将所有客源-季节聚类分析中的聚类数量都定为3。以下是聚类结果：横纵轴表示降维后最主要的2个维度能够解释的原多维度空间的变异比例，越高越好；该二维图中通常越靠近的点越相近，相同颜色表示同一个聚类，其中红、绿、蓝分别代表1、2、3号聚类。
+
+```{r}
+# 打印所有聚类图。
+plot_grid(
+  plotlist = lapply(cluster_res, function(x) x[["plt_cluster"]]), nrow = 2
+)
+```
+
+那么各个空间组团中的地点被分到那些聚类中呢？可以用桑基图表示。下图中各子图的排序和上图相同，即上面是local，下面是tourist。
+
+```{r}
+# 打印所有桑基图。
+plot_grid(
+  plotlist = lapply(cluster_res, function(x) x[["plt_sankey"]]), nrow = 2
+)
+```
+
+那么各种聚类有什么特征呢？要回到原始数据中，用雷达图表示。首先是local中1、2、4季度各聚类的雷达图（第3季度中缺失值太多，无法作图）。可以看出第1季度和第2季度比较相似：似乎第1号聚类比较均衡，第2号聚类则harmonic和closeness比较突出，第3号聚类数量太少难以判断。
+
+```{r}
+lapply(
+  c(1, 2, 4),
+  function(x) plt_radar(cluster_res[[x]]$res_df)
+) %>%
+  Reduce(c, .) %>%
+  plot_grid(plotlist = ., nrow = 3)
+```
+
+然后是tourist中1、2、4季度各聚类的的雷达图（类似地，刚好第3季度也是缺失值太多，无法作图；如果需要的话，或许可以通过一定技术手段解决）。
+
+```{r}
+lapply(
+  c(5, 6, 8),
+  function(x) plt_radar(cluster_res[[x]]$res_df)
+) %>%
+  Reduce(c, .) %>%
+  plot_grid(plotlist = ., nrow = 3)
+```
+
+**问题：这个结果有什么涵义？和后面的结果是否要关联；如果要的话，如何关联？是否有必要分季节做？**
+
+## 可达性指标
+
+基于谢提供的不同POI可达性图层数据，计算POI可达性指标。对于每一类POI，对各个地点计算可达性指标如下：一个地点有步行和开车不同时间情况下的可达性图层，每个图层可计算一个该图层与地点多边形的重叠面积，那么，对于该地点该类POI的可达性指标为：各时间下可达性图层和该地点交叠面积的加权只和，此处权重为时间的倒数，也就是说，时间越短，权重越大，该可达性图层越重要。
+
+$$
+0.4 \times \sum \text{WalkArea}_i \times walk\_w_i + 0.6 \times \sum \text{DriveArea}_{i} \times drive\_w_i
+$$
+
+## 连接供需
+
+对各个节点的基础设施供需进行对比，以提供基础设施建设或服务投资的建议。主要思路是：以节点的网络指标表示需求，因为需求跟人类行为有关；对应的服务或基础设施POI可达性指标作为供给；对比节点的需求和供给，以标准化后的两者比率表示供给率。
+
+各网络指标和服务之间进行匹配，匹配思路的例子如下：
+
+-   对本地人：indegree高 - 作为目的地的吸引力强 - 对应本地服务，如市政中心；
+
+-   对游客：indegree高 - 作为旅游目的地的吸引力强 - 对应应增加旅游基础设施如酒店、餐厅、景点；Betweenness高 - 从此处中转的人多 - 可作为交通枢纽；Closeness高 - 到其他点的"平均距离"小 - 可能是中心景点或具有中心景点潜力。
+
+**目前的问题：对于每种需求，需要匹配一对网络指标和POI，这种匹配比较困难。**此前谢尝试进行了匹配，但是很多是多对一的匹配，这种匹配下，我们无法直接计算供需比------要一对一的匹配才能进行供需比。因此，我对这个多对一供需关系进行了修改，变成了一对一的关系。对于供需匹配，还需要进一步的讨论或者修改。当前的匹配如下：
+
+-   对于本地人：市政-indegree，教育-indegree，公共娱乐-degree，健康-degree，零售-harmonic（问题：为何这么匹配？），住宿和食物-indegree。
+
+-   对于旅客：住宿和食物-indgree，景点-indegree，公共娱乐- degree，交通-betweenness。
+
+计算结果见附件表格，数据中各列对应数据为：
+
+-   vis_src：客源；season：季度id：地点编号； longitude和latitude：经纬度； indegree，outdegree，degree，closness_centrality，harmonicclosness_centrality，betweeness_centrality：中心度； ac，education等：POI可达性指数。
+
+-   local_ds_gov，local_ds_edu，local_ds_amen，tourist_ds_tour，tourist_ds_mobility - 对于不同客源的各类需求，例如local_ds_gov是对于本地人而言的市政服务需求（因此游客行中的数据不算数）。
+
+-   spa_group：空间组团。
+
+我们可以逐一看看当前匹配并计算出来的几个供需结果。本地人各类供需匹配结果如下。
+
+```{r fig.height=10}
+loc_dem_sup %>%
+  st_drop_geometry() %>%
+  filter(vis_src == "local") %>%
+  select(spa_group, season, contains("local_")) %>%
+  pivot_longer(
+    cols = c(contains("local_")), names_to = "ds_cat", values_to = "ds_val"
+  ) %>%
+  ggplot(aes(spa_group, ds_val)) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(ds_cat ~ season)
+```
+
+由于分布过于偏态，因此用对数尺度看看效果：
+
+```{r fig.height=10}
+loc_dem_sup %>%
+  st_drop_geometry() %>%
+  filter(vis_src == "local") %>%
+  select(spa_group, season, contains("local_")) %>%
+  pivot_longer(
+    cols = c(contains("local_")), names_to = "ds_cat", values_to = "ds_val"
+  ) %>%
+  ggplot(aes(spa_group, log(ds_val))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(ds_cat ~ season)
+```
+
+游客各项供需结果如下：
+
+```{r fig.height=8}
+loc_dem_sup %>%
+  st_drop_geometry() %>%
+  filter(vis_src == "tourist") %>%
+  select(spa_group, season, contains("tourist_")) %>%
+  pivot_longer(
+    cols = c(contains("tourist_")), names_to = "ds_cat", values_to = "ds_val"
+  ) %>%
+  ggplot(aes(spa_group, ds_val)) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(ds_cat ~ season)
+```
+
+如果用对数尺度表现结果的话：
+
+```{r fig.height=8}
+loc_dem_sup %>%
+  st_drop_geometry() %>%
+  filter(vis_src == "tourist") %>%
+  select(spa_group, season, contains("tourist_")) %>%
+  pivot_longer(
+    cols = c(contains("tourist_")), names_to = "ds_cat", values_to = "ds_val"
+  ) %>%
+  ggplot(aes(spa_group, log(ds_val))) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(ds_cat ~ season)
+```

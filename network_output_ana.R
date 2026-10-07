@@ -524,7 +524,9 @@ loc_dem_sup <-
         demand_edu    = degree_norm,
         demand_gov    = degree_norm,
         demand_health = closeness,
-        demand_retail = 0.7 * closeness + 0.3 * harmonic,
+        # Commercial demand uses the same specification for both groups:
+        # direct mobility connectivity plus network-wide reachability.
+        demand_retail = 0.7 * degree_norm + 0.3 * harmonic,
         # Step 3: SDI_raw = 可达性 / 需求指数。
         sdi_raw_edu    = education  / demand_edu,
         sdi_raw_gov    = government / demand_gov,
@@ -591,7 +593,7 @@ loc_dem_sup <-
   mutate(long = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
   st_drop_geometry()
 
-# 基于固定阈值识别相对供需错配：高需求（Q75及以上）且低可达性（Q25及以下）。
+# 基于固定阈值识别相对供需错配：高需求（Q60及以上）且低可达性（Q40及以下）。
 # 阈值在每个用户组 × 服务类型的全部地点和四个季度中统一计算，
 # 因此不会强制每个季度产生固定数量的“短缺”地点。
 loc_mismatch <- list(
@@ -616,7 +618,7 @@ loc_mismatch <- list(
     filter(vis_src == "local") %>%
     transmute(
       vis_src, id, season, ds_cat = "ds_retail_mix",
-      demand = 0.7 * closeness + 0.3 * harmonic,
+      demand = 0.7 * degree_norm + 0.3 * harmonic,
       accessibility = retail
     ),
   # 游客使用的服务。
@@ -649,12 +651,12 @@ loc_mismatch <- list(
   filter(!is.na(demand), !is.na(accessibility)) %>%
   group_by(vis_src, ds_cat) %>%
   mutate(
-    demand_q75 = quantile(demand, 0.75, na.rm = TRUE),
-    accessibility_q25 = quantile(accessibility, 0.25, na.rm = TRUE),
+    demand_q60 = quantile(demand, 0.60, na.rm = TRUE),
+    accessibility_q40 = quantile(accessibility, 0.40, na.rm = TRUE),
     demand_percentile = percent_rank(demand),
     accessibility_percentile = percent_rank(accessibility),
     mismatch_severity = pmax(demand_percentile - accessibility_percentile, 0),
-    is_mismatch = demand >= demand_q75 & accessibility <= accessibility_q25
+    is_mismatch = demand >= demand_q60 & accessibility <= accessibility_q40
   ) %>%
   ungroup() %>%
   left_join(
@@ -687,26 +689,74 @@ ds_mismatch_label <- c(
   "ds_tour_mix" = "Recreation"
 )
 
-plt_mismatch_map <- function(vis_src_x) {
+# 固定服务颜色，确保居民与游客图层中的同一服务始终使用同一种颜色。
+ds_mismatch_colors <- setNames(
+  pal_npg()(length(ds_mismatch_label)),
+  names(ds_mismatch_label)
+)
+ds_mismatch_colors[c("ds_edu", "ds_health")] <-
+  ds_mismatch_colors[c("ds_health", "ds_edu")]
+ds_mismatch_colors[c("ds_retail_mix", "ds_accomfood_mix")] <-
+  ds_mismatch_colors[c("ds_accomfood_mix", "ds_retail_mix")]
+
+# 按用户组、cluster、服务和季度汇总错配地点数，作为结果陈述的依据。
+mismatch_cluster_service_summary <- loc_mismatch %>%
+  mutate(is_mismatch = as.integer(is_mismatch)) %>%
+  group_by(vis_src, spa_group, ds_cat, season) %>%
+  summarise(
+    mismatch_n = sum(is_mismatch),
+    eligible_n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(service = unname(ds_mismatch_label[ds_cat])) %>%
+  select(vis_src, spa_group, service, season, mismatch_n, eligible_n) %>%
+  pivot_wider(
+    names_from = season,
+    values_from = c(mismatch_n, eligible_n),
+    names_glue = "{.value}_quarter_{season}",
+    values_fill = 0
+  ) %>%
+  mutate(
+    mismatch_total = rowSums(across(starts_with("mismatch_n_quarter_"))),
+    eligible_total = rowSums(across(starts_with("eligible_n_"))),
+    mismatch_percent = 100 * mismatch_total / eligible_total
+  ) %>%
+  arrange(vis_src, spa_group, service)
+
+write.csv(
+  mismatch_cluster_service_summary,
+  "data_proc/loc_mismatch_cluster_service_summary.csv",
+  row.names = FALSE
+)
+
+plt_mismatch_map <- function() {
   plt_data <- loc_mismatch %>%
-    filter(vis_src == vis_src_x, is_mismatch) %>%
+    filter(is_mismatch) %>%
     mutate(
       season = factor(season, levels = 1:4),
+      vis_src = factor(
+        vis_src, levels = c("local", "tourist"),
+        labels = c("Residents", "Tourists")
+      ),
       ds_val_fill = 1
     ) %>%
     pivot_wider(
-      id_cols = c(id, season, long, lat),
+      id_cols = c(vis_src, id, season, long, lat),
       names_from = ds_cat,
       values_from = ds_val_fill,
       values_fill = 0
     ) %>%
-    mutate(radius = 0.02)
+    mutate(radius = 0.0324)
 
-  p <- ggplot(data = tibble(season = factor(1:4, levels = 1:4))) +
+  p <- ggplot(data = expand_grid(
+    vis_src = factor(c("Residents", "Tourists"),
+                     levels = c("Residents", "Tourists")),
+    season = factor(1:4, levels = 1:4)
+  )) +
     geom_sf(data = amami, fill = "white") +
     geom_sf(
       data = st_centroid(loc) %>% filter(!grepl("^ka", loc_id)),
-      size = 1, col = "darkgrey", alpha = 0.8
+      size = 1.4, col = "darkgrey", alpha = 0.8
     )
 
   if (nrow(plt_data) > 0) {
@@ -719,19 +769,25 @@ plt_mismatch_map <- function(vis_src_x) {
   }
 
   p +
-    scale_fill_npg(labels = ds_mismatch_label) +
+    scale_fill_manual(
+      values = ds_mismatch_colors,
+      breaks = names(ds_mismatch_label),
+      labels = ds_mismatch_label,
+      drop = FALSE
+    ) +
     scale_x_continuous(
       breaks = c(129.1, 129.3, 129.5, 129.7),
       labels = c("129.1E", "129.3E", "129.5E", "129.7E")
     ) +
-    labs(fill = "Service") +
-    theme_bw() +
+    labs(x = NULL, y = NULL, fill = "Service") +
+    theme_bw(base_size = 22) +
     theme(
-      axis.text.x = element_text(angle = 90),
+      axis.text.x = element_text(size = 13.6, angle = 90),
+      axis.text.y = element_text(size = 13.6),
       panel.grid = element_line(color = "white")
     ) +
-    facet_wrap(
-      .~ season, nrow = 1, drop = FALSE,
+    facet_grid(
+      vis_src ~ season, drop = FALSE,
       labeller = labeller(season = c(
         "1" = "Quarter 1", "2" = "Quarter 2",
         "3" = "Quarter 3", "4" = "Quarter 4"
@@ -740,17 +796,279 @@ plt_mismatch_map <- function(vis_src_x) {
 }
 
 png(
-  paste0("data_proc/ds_mismatch_map_local_", Sys.Date(), ".png"),
-  width = 3500, height = 1000, res = 300
+  paste0("data_proc/ds_mismatch_map_combined_", Sys.Date(), ".png"),
+  width = 3500, height = 1900, res = 300
 )
-print(plt_mismatch_map("local"))
+print(plt_mismatch_map())
 dev.off()
 
-png(
-  paste0("data_proc/ds_mismatch_map_tourist_", Sys.Date(), ".png"),
-  width = 3500, height = 1000, res = 300
+# 重叠饼图的避让版本：在每个用户组和季度内移动相互遮挡的饼图，
+# 并用引线连接饼图中心与原始地点。
+separate_overlapping_pies <- function(data, radius = 0.0324,
+                                      min_distance = radius * 2.1,
+                                      max_offset = radius * 2.8,
+                                      iterations = 250) {
+  if (nrow(data) < 2) {
+    return(data %>% mutate(plot_long = long, plot_lat = lat))
+  }
+
+  original <- as.matrix(data[, c("long", "lat")])
+  displaced <- original
+
+  for (iteration in seq_len(iterations)) {
+    for (i in seq_len(nrow(data) - 1)) {
+      for (j in (i + 1):nrow(data)) {
+        delta <- displaced[j, ] - displaced[i, ]
+        distance <- sqrt(sum(delta^2))
+        if (distance < min_distance) {
+          if (distance == 0) {
+            angle <- 2 * pi * (j - i) / nrow(data)
+            direction <- c(cos(angle), sin(angle))
+          } else {
+            direction <- delta / distance
+          }
+          shift <- direction * (min_distance - distance) / 2
+          displaced[i, ] <- displaced[i, ] - shift
+          displaced[j, ] <- displaced[j, ] + shift
+        }
+      }
+    }
+
+    # 轻微拉回原地点，避免饼图移动得过远。
+    displaced <- displaced + 0.015 * (original - displaced)
+    offsets <- displaced - original
+    offset_distance <- sqrt(rowSums(offsets^2))
+    too_far <- offset_distance > max_offset
+    if (any(too_far)) {
+      displaced[too_far, ] <- original[too_far, ] +
+        offsets[too_far, , drop = FALSE] *
+        (max_offset / offset_distance[too_far])
+    }
+  }
+
+  data %>%
+    mutate(
+      plot_long = displaced[, 1],
+      plot_lat = displaced[, 2]
+    )
+}
+
+ds_mismatch_order <- c(
+  "ds_gov", "ds_edu", "ds_health", "ds_retail_mix",
+  "ds_accomfood_mix", "ds_tour_mix"
 )
-print(plt_mismatch_map("tourist"))
+
+plt_mismatch_map_leaderline_group <- function(vis_src_x, panel_title) {
+  plt_data <- loc_mismatch %>%
+    filter(is_mismatch, vis_src == vis_src_x) %>%
+    mutate(
+      season = factor(season, levels = 1:4),
+      ds_val_fill = 1
+    ) %>%
+    pivot_wider(
+      id_cols = c(id, season, long, lat),
+      names_from = ds_cat,
+      values_from = ds_val_fill,
+      values_fill = 0
+    ) %>%
+    group_by(season) %>%
+    group_modify(~ separate_overlapping_pies(.x)) %>%
+    ungroup() %>%
+    mutate(radius = 0.0324)
+
+  ggplot(data = tibble(season = factor(1:4, levels = 1:4))) +
+    geom_sf(data = amami, fill = "white", color = "grey60") +
+    geom_segment(
+      data = plt_data,
+      aes(x = long, y = lat, xend = plot_long, yend = plot_lat),
+      color = "grey35", linewidth = 0.35
+    ) +
+    geom_scatterpie(
+      data = plt_data,
+      aes(x = plot_long, y = plot_lat, r = radius),
+      cols = grep("^ds_", names(plt_data), value = TRUE),
+      linewidth = 0.1, color = "white", alpha = 0.9
+    ) +
+    scale_fill_manual(
+      values = ds_mismatch_colors,
+      breaks = ds_mismatch_order,
+      labels = ds_mismatch_label,
+      drop = TRUE
+    ) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    guides(fill = guide_legend(nrow = 1, byrow = TRUE)) +
+    labs(x = NULL, y = NULL, fill = "Service", title = panel_title) +
+    theme_bw(base_size = 22) +
+    theme(
+      axis.text.x = element_text(size = 13.6, angle = 90),
+      axis.text.y = element_text(size = 13.6),
+      panel.grid = element_line(color = "white"),
+      plot.title = element_text(size = 22, hjust = 0, face = "plain"),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    facet_wrap(
+      . ~ season, nrow = 1, drop = FALSE,
+      labeller = labeller(season = c(
+        "1" = "Quarter 1", "2" = "Quarter 2",
+        "3" = "Quarter 3", "4" = "Quarter 4"
+      ))
+    )
+}
+
+plt_mismatch_map_leaderlines <- function() {
+  plt_mismatch_map_leaderline_group("local", "(a) Residents") /
+    plt_mismatch_map_leaderline_group("tourist", "(b) Tourists") +
+    plot_layout(guides = "keep")
+}
+
+png(
+  paste0("data_proc/ds_mismatch_map_combined_leaderlines_",
+         Sys.Date(), ".png"),
+  width = 3500, height = 3000, res = 300
+)
+print(plt_mismatch_map_leaderlines())
+dev.off()
+
+# 离岸排列版本：每组重叠饼图保留一个在原位，其余移到岛屿轮廓外。
+move_overlapping_pies_offshore <- function(data, radius = 0.0324,
+                                           min_distance = radius * 2.1) {
+  data <- data %>% mutate(plot_long = long, plot_lat = lat, moved = FALSE)
+  n_points <- nrow(data)
+  if (n_points < 2) return(data)
+
+  coordinates <- as.matrix(data[, c("long", "lat")])
+  distances <- as.matrix(dist(coordinates))
+  adjacency <- distances < min_distance & distances > 0
+
+  # 找出由相互重叠的饼图构成的连通组。
+  component <- rep(NA_integer_, n_points)
+  component_id <- 0L
+  for (start in seq_len(n_points)) {
+    if (!is.na(component[start])) next
+    component_id <- component_id + 1L
+    queue <- start
+    component[start] <- component_id
+    while (length(queue) > 0) {
+      current <- queue[1]
+      queue <- queue[-1]
+      neighbours <- which(adjacency[current, ] & is.na(component))
+      if (length(neighbours) > 0) {
+        component[neighbours] <- component_id
+        queue <- c(queue, neighbours)
+      }
+    }
+  }
+
+  island_bbox <- st_bbox(amami)
+  island_midpoint <- mean(c(island_bbox[["xmin"]], island_bbox[["xmax"]]))
+  offshore_x <- c(
+    left = island_bbox[["xmin"]] - 0.10,
+    right = island_bbox[["xmax"]] + 0.10
+  )
+
+  for (group_id in unique(component)) {
+    members <- which(component == group_id)
+    if (length(members) < 2) next
+
+    group_center <- colMeans(coordinates[members, , drop = FALSE])
+    # 将最接近重叠组中心的一个饼图留在原地点。
+    keep <- members[which.min(rowSums(
+      (coordinates[members, , drop = FALSE] -
+         matrix(group_center, nrow = length(members), ncol = 2,
+                byrow = TRUE))^2
+    ))]
+    move <- setdiff(members, keep)
+    side <- if (group_center[1] >= island_midpoint) "right" else "left"
+    vertical_positions <- group_center[2] +
+      (seq_along(move) - mean(seq_along(move))) * 0.085
+
+    data$plot_long[move] <- offshore_x[[side]]
+    data$plot_lat[move] <- vertical_positions
+    data$moved[move] <- TRUE
+  }
+
+  data
+}
+
+plt_mismatch_map_offshore <- function() {
+  plt_data <- loc_mismatch %>%
+    filter(is_mismatch) %>%
+    mutate(
+      season = factor(season, levels = 1:4),
+      vis_src = factor(
+        vis_src, levels = c("local", "tourist"),
+        labels = c("Residents", "Tourists")
+      ),
+      ds_val_fill = 1
+    ) %>%
+    pivot_wider(
+      id_cols = c(vis_src, id, season, long, lat),
+      names_from = ds_cat,
+      values_from = ds_val_fill,
+      values_fill = 0
+    ) %>%
+    group_by(vis_src, season) %>%
+    group_modify(~ move_overlapping_pies_offshore(.x)) %>%
+    ungroup() %>%
+    mutate(radius = 0.0324)
+
+  ggplot(data = expand_grid(
+    vis_src = factor(c("Residents", "Tourists"),
+                     levels = c("Residents", "Tourists")),
+    season = factor(1:4, levels = 1:4)
+  )) +
+    geom_sf(data = amami, fill = "white") +
+    geom_sf(
+      data = st_centroid(loc) %>% filter(!grepl("^ka", loc_id)),
+      size = 1.4, col = "darkgrey", alpha = 0.8
+    ) +
+    geom_segment(
+      data = plt_data %>% filter(moved),
+      aes(x = long, y = lat, xend = plot_long, yend = plot_lat),
+      color = "grey35", linewidth = 0.35
+    ) +
+    geom_scatterpie(
+      data = plt_data,
+      aes(x = plot_long, y = plot_lat, r = radius),
+      cols = grep("^ds_", names(plt_data), value = TRUE),
+      linewidth = 0.1, color = "white", alpha = 0.9
+    ) +
+    scale_fill_manual(
+      values = ds_mismatch_colors,
+      breaks = names(ds_mismatch_label),
+      labels = ds_mismatch_label,
+      drop = FALSE
+    ) +
+    scale_x_continuous(
+      breaks = c(129.1, 129.3, 129.5, 129.7),
+      labels = c("129.1E", "129.3E", "129.5E", "129.7E")
+    ) +
+    labs(x = NULL, y = NULL, fill = "Service") +
+    theme_bw(base_size = 22) +
+    theme(
+      axis.text.x = element_text(size = 13.6, angle = 90),
+      axis.text.y = element_text(size = 13.6),
+      panel.grid = element_line(color = "white")
+    ) +
+    facet_grid(
+      vis_src ~ season, drop = FALSE,
+      labeller = labeller(season = c(
+        "1" = "Quarter 1", "2" = "Quarter 2",
+        "3" = "Quarter 3", "4" = "Quarter 4"
+      ))
+    )
+}
+
+png(
+  paste0("data_proc/ds_mismatch_map_combined_offshore_",
+         Sys.Date(), ".png"),
+  width = 3500, height = 1900, res = 300
+)
+print(plt_mismatch_map_offshore())
 dev.off()
 
 # 多组分位数阈值的敏感性分析：由宽松到严格。
@@ -798,6 +1116,69 @@ write.csv(
   row.names = FALSE
 )
 
+# 敏感性分析：计算Q60/Q40主分析中的错配地点，在更严格阈值下的保留比例。
+# 阈值越严格，保留比例越低；下降缓慢表示主分析识别结果更稳定。
+mismatch_sensitivity_retention <- mismatch_sensitivity_counts %>%
+  group_by(vis_src, season, ds_cat) %>%
+  mutate(
+    main_n = mismatch_n[threshold == "Q60/Q40"],
+    retention_rate = if_else(main_n > 0, mismatch_n / main_n, NA_real_)
+  ) %>%
+  ungroup()
+
+write.csv(
+  mismatch_sensitivity_retention,
+  "data_proc/loc_mismatch_sensitivity_retention.csv",
+  row.names = FALSE
+)
+
+plt_mismatch_sensitivity_retention <- mismatch_sensitivity_retention %>%
+  mutate(
+    vis_src = factor(
+      vis_src, levels = c("local", "tourist"),
+      labels = c("Residents", "Tourists")
+    ),
+    season = factor(
+      season, levels = 1:4,
+      labels = paste("Quarter", 1:4)
+    )
+  ) %>%
+  ggplot(aes(
+    x = threshold, y = retention_rate,
+    color = ds_cat, group = ds_cat
+  )) +
+  geom_hline(yintercept = 1, color = "grey80", linewidth = 0.3) +
+  geom_line(linewidth = 0.7, na.rm = TRUE) +
+  geom_point(size = 1.8, na.rm = TRUE) +
+  scale_color_manual(
+    values = ds_mismatch_colors,
+    breaks = names(ds_mismatch_label),
+    labels = ds_mismatch_label,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1), breaks = seq(0, 1, 0.25),
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    x = "Demand/accessibility percentile threshold",
+    y = "Locations retained from Q60/Q40",
+    color = "Service"
+  ) +
+  facet_grid(vis_src ~ season) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+png(
+  paste0("data_proc/ds_mismatch_sensitivity_retention_", Sys.Date(), ".png"),
+  width = 3500, height = 1900, res = 300
+)
+print(plt_mismatch_sensitivity_retention)
+dev.off()
+
 plt_mismatch_sensitivity <- function(vis_src_x) {
   threshold_levels <- levels(mismatch_thresholds$threshold)
   plt_data <- loc_mismatch_sensitivity %>%
@@ -835,7 +1216,12 @@ plt_mismatch_sensitivity <- function(vis_src_x) {
   }
 
   p +
-    scale_fill_npg(labels = ds_mismatch_label) +
+    scale_fill_manual(
+      values = ds_mismatch_colors,
+      breaks = names(ds_mismatch_label),
+      labels = ds_mismatch_label,
+      drop = FALSE
+    ) +
     scale_x_continuous(
       breaks = c(129.1, 129.3, 129.5, 129.7),
       labels = c("129.1E", "129.3E", "129.5E", "129.7E")
